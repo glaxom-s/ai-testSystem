@@ -1,0 +1,10 @@
+{
+  "name": "social-video-studio",
+  "private": true,
+  "scripts": {
+    "install:all": "npm install --prefix server && npm install --prefix client",
+    "dev:server": "npm run dev --prefix server",
+    "dev:client": "npm run dev --prefix client",
+    "dev": "echo Run 'npm run dev:server' and 'npm run dev:client' in two terminals."
+  }
+}
