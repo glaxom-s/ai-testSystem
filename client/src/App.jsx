@@ -510,7 +510,7 @@ export default function App() {
           background: var(--surface-2);
           padding: 0.1rem 0.35rem;
           border-radius: 6px;
-          font-size: 0.78rem;
+          font-size: 0.88rem;
         }
       `}</style>
     </div>
