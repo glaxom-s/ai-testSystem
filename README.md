@@ -37,7 +37,10 @@ Open `http://localhost:5173`. The Vite dev server proxies `/api` to the backend.
 |--------|------|-------------|
 | GET | `/api/health` | Health check |
 | GET | `/api/presets` | Platform size map |
-| POST | `/api/process` | Multipart form: `video`, `platform`, `framing`, `effect`, `ultraHd` |
+| POST | `/api/upload` | Multipart `video` → `{ uploadId }` (stable filename for the next step) |
+| POST | `/api/render` | JSON: `uploadId`, `platform`, `framing`, `effect`, `outputFormat`, `quality`, `resolutionTier` (optional `ultraHd`) → `{ jobId }` immediately; encoding runs in the background |
+| GET | `/api/jobs/:jobId` | `{ status: processing\|done\|error, percent, downloadUrl?, error? }` — poll for progress |
+| POST | `/api/process` | **Legacy** single-shot: multipart `video` + same fields as `/api/render` (no live progress) |
 | GET | `/api/download/:file` | Download rendered file |
 
 Optional env: see `.env.example`.

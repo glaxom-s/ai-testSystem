@@ -5,7 +5,15 @@ import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
 import { v4 as uuidv4 } from "uuid";
-import { processVideo, listPresets, ensureDir, safeJoin } from "./videoProcessor.js";
+import {
+  processVideo,
+  listPresets,
+  listExportOptions,
+  outputExtensionForFormat,
+  getOutputSizeMeta,
+  ensureDir,
+  safeJoin,
+} from "./videoProcessor.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -26,21 +34,133 @@ app.use(
 );
 app.use(express.json());
 
+const videoFileFilter = (_req, file, cb) => {
+  const ok = /\.(mp4|mov|webm|mkv|avi)$/i.test(file.originalname) || /^video\//.test(file.mimetype);
+  cb(null, ok);
+};
+
 const upload = multer({
   dest: UPLOADS,
   limits: { fileSize: 500 * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => {
-    const ok = /\.(mp4|mov|webm|mkv|avi)$/i.test(file.originalname) || /^video\//.test(file.mimetype);
-    cb(null, ok);
-  },
+  fileFilter: videoFileFilter,
 });
+
+const uploadNamed = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, UPLOADS),
+    filename: (_req, file, cb) => {
+      const ext = path.extname(file.originalname || "") || ".mp4";
+      cb(null, `${uuidv4()}${ext}`);
+    },
+  }),
+  limits: { fileSize: 500 * 1024 * 1024 },
+  fileFilter: videoFileFilter,
+});
+
+/** @type {Map<string, Record<string, unknown>>} */
+const jobs = new Map();
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });
 
 app.get("/api/presets", (_req, res) => {
-  res.json({ presets: listPresets() });
+  res.json({ presets: listPresets(), export: listExportOptions() });
+});
+
+app.post("/api/upload", uploadNamed.single("video"), (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: "No video file (field name: video)" });
+  }
+  res.json({ uploadId: req.file.filename });
+});
+
+app.post("/api/render", (req, res) => {
+  const uploadId = req.body?.uploadId;
+  if (!uploadId || typeof uploadId !== "string") {
+    return res.status(400).json({ error: "uploadId required" });
+  }
+  const base = path.basename(uploadId);
+  if (base !== uploadId) {
+    return res.status(400).json({ error: "Invalid uploadId" });
+  }
+  const inputPath = safeJoin(UPLOADS, base);
+  if (!fs.existsSync(inputPath)) {
+    return res.status(404).json({ error: "Upload not found or expired" });
+  }
+
+  const platform = String(req.body.platform || "instagram-reels");
+  const framing = String(req.body.framing || "cover");
+  const effect = String(req.body.effect || "none");
+  const ultraHdLegacy = req.body.ultraHd === true || req.body.ultraHd === "true";
+  const resolutionTier = req.body.resolutionTier != null ? String(req.body.resolutionTier) : "";
+  const outputFormat = String(req.body.outputFormat || "mp4").toLowerCase();
+  const quality = String(req.body.quality || "balanced").toLowerCase();
+
+  const outId = uuidv4();
+  const ext = outputExtensionForFormat(outputFormat);
+  const outputName = `${outId}${ext}`;
+  const outputPath = safeJoin(OUTPUTS, outputName);
+  const jobId = uuidv4();
+
+  const jobState = {
+    status: "processing",
+    percent: 0,
+    phase: "encoding",
+  };
+  jobs.set(jobId, jobState);
+
+  res.json({ jobId });
+
+  (async () => {
+    try {
+      await processVideo(
+        {
+          inputPath,
+          outputPath,
+          platform,
+          framing,
+          effect,
+          resolutionTier: resolutionTier || undefined,
+          ultraHd: ultraHdLegacy,
+          outputFormat,
+          quality,
+        },
+        (pct) => {
+          jobState.percent = pct;
+        }
+      );
+
+      fs.unlink(inputPath, () => {});
+      const sizeMeta = getOutputSizeMeta(platform, resolutionTier || undefined, ultraHdLegacy);
+      jobState.status = "done";
+      jobState.percent = 100;
+      jobState.phase = "done";
+      jobState.downloadUrl = `/api/download/${outputName}`;
+      jobState.outputFormat = outputFormat === "mov" || outputFormat === "webm" ? outputFormat : "mp4";
+      jobState.quality = quality;
+      jobState.resolutionTier = sizeMeta?.resolutionTier;
+      jobState.outputWidth = sizeMeta?.width;
+      jobState.outputHeight = sizeMeta?.height;
+      jobState.id = outId;
+
+      setTimeout(() => jobs.delete(jobId), 15 * 60 * 1000);
+    } catch (e) {
+      fs.unlink(inputPath, () => {});
+      jobState.status = "error";
+      jobState.error = e.message || "Processing failed";
+      jobState.percent = 0;
+      setTimeout(() => jobs.delete(jobId), 60 * 60 * 1000);
+    }
+  })();
+});
+
+app.get("/api/jobs/:jobId", (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ error: "Job not found" });
+  }
+  res.json(job);
 });
 
 app.post("/api/process", upload.single("video"), async (req, res) => {
@@ -51,10 +171,13 @@ app.post("/api/process", upload.single("video"), async (req, res) => {
   const platform = String(req.body.platform || "instagram-reels");
   const framing = String(req.body.framing || "cover");
   const effect = String(req.body.effect || "none");
-  const ultraHd = req.body.ultraHd === true || req.body.ultraHd === "true";
+  const ultraHdLegacy = req.body.ultraHd === true || req.body.ultraHd === "true";
+  const resolutionTier = req.body.resolutionTier != null ? String(req.body.resolutionTier) : "";
+  const outputFormat = String(req.body.outputFormat || "mp4").toLowerCase();
+  const quality = String(req.body.quality || "balanced").toLowerCase();
 
   const id = uuidv4();
-  const ext = path.extname(req.file.originalname) || ".mp4";
+  const ext = outputExtensionForFormat(outputFormat);
   const inputPath = req.file.path;
   const outputName = `${id}${ext}`;
   const outputPath = safeJoin(OUTPUTS, outputName);
@@ -66,7 +189,10 @@ app.post("/api/process", upload.single("video"), async (req, res) => {
       platform,
       framing,
       effect,
-      ultraHd,
+      resolutionTier: resolutionTier || undefined,
+      ultraHd: ultraHdLegacy,
+      outputFormat,
+      quality,
     });
   } catch (e) {
     fs.unlink(inputPath, () => {});
@@ -74,13 +200,18 @@ app.post("/api/process", upload.single("video"), async (req, res) => {
   }
 
   fs.unlink(inputPath, () => {});
+  const sizeMeta = getOutputSizeMeta(platform, resolutionTier || undefined, ultraHdLegacy);
   res.json({
     id,
     downloadUrl: `/api/download/${id}${ext}`,
     platform,
     framing,
     effect,
-    ultraHd,
+    outputFormat: outputFormat === "mov" || outputFormat === "webm" ? outputFormat : "mp4",
+    quality,
+    resolutionTier: sizeMeta?.resolutionTier,
+    outputWidth: sizeMeta?.width,
+    outputHeight: sizeMeta?.height,
   });
 });
 

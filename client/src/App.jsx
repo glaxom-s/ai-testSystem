@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const PLATFORMS = [
   { id: 'instagram-reels', group: 'Instagram', icon: '🎬', desc: '9:16 · Reels & short video' },
@@ -25,16 +25,65 @@ const FRAMING = [
   { id: "contain", label: "Fit inside", hint: "Shows full video with bars if needed." },
 ];
 
+const OUTPUT_FORMATS = [
+  { id: "mp4", label: "MP4", hint: "H.264 + AAC — universal; best for Instagram & Facebook" },
+  { id: "mov", label: "MOV", hint: "Same codecs in a QuickTime-friendly container" },
+  { id: "webm", label: "WebM", hint: "VP9 + Opus — web-friendly, often smaller files" },
+];
+
+const ENCODING_QUALITY = [
+  { id: "light", label: "Light", hint: "Smaller file, faster encode" },
+  { id: "balanced", label: "Balanced", hint: "Recommended default" },
+  { id: "high", label: "High", hint: "Sharper, larger file" },
+  { id: "max", label: "Maximum", hint: "Best quality, slowest" },
+];
+
+/** Matches server PRESETS — used to preview output pixel size for the selected tier. */
+const PRESET_DIM = {
+  "instagram-reels": { w: 1080, h: 1920 },
+  "instagram-story": { w: 1080, h: 1920 },
+  "instagram-square": { w: 1080, h: 1080 },
+  "instagram-portrait": { w: 1080, h: 1350 },
+  "facebook-feed": { w: 1920, h: 1080 },
+  "facebook-story": { w: 1080, h: 1920 },
+  "facebook-square": { w: 1080, h: 1080 },
+};
+
+const SHORT_SIDE = { hd: 720, fullhd: 1080, "2k": 1440, "4k": 2160 };
+
+const RESOLUTION_TIERS = [
+  { id: "hd", label: "HD", badge: "720p class", hint: "Short side 720 px — smaller, faster uploads." },
+  { id: "fullhd", label: "Full HD", badge: "1080p class", hint: "Short side 1080 px — typical social quality." },
+  { id: "2k", label: "2K", badge: "1440p class", hint: "Short side 1440 px — between Full HD and 4K." },
+  { id: "4k", label: "4K / UHD", badge: "2160p class", hint: "Short side 2160 px — full UHD frame + light sharpen." },
+];
+
+function dimensionsForTier(pw, ph, tier) {
+  const shortTarget = SHORT_SIDE[tier] ?? 1080;
+  const m = Math.min(pw, ph);
+  const f = shortTarget / m;
+  let w = Math.round(pw * f);
+  let h = Math.round(ph * f);
+  if (w % 2) w -= 1;
+  if (h % 2) h -= 1;
+  return { w: Math.max(2, w), h: Math.max(2, h) };
+}
+
 export default function App() {
   const [file, setFile] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
   const [platform, setPlatform] = useState("instagram-reels");
   const [effect, setEffect] = useState("none");
   const [framing, setFraming] = useState("cover");
-  const [ultraHd, setUltraHd] = useState(false);
+  const [outputFormat, setOutputFormat] = useState("mp4");
+  const [quality, setQuality] = useState("balanced");
+  const [resolutionTier, setResolutionTier] = useState("fullhd");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [downloadPath, setDownloadPath] = useState(null);
+  const [progressPercent, setProgressPercent] = useState(0);
+  const [progressPhase, setProgressPhase] = useState("");
+  const pollRef = useRef(null);
 
   const groupedPlatforms = useMemo(() => {
     const g = {};
@@ -45,11 +94,34 @@ export default function App() {
     return g;
   }, []);
 
+  const estimatedOutputPx = useMemo(() => {
+    const d = PRESET_DIM[platform];
+    if (!d) return null;
+    return dimensionsForTier(d.w, d.h, resolutionTier);
+  }, [platform, resolutionTier]);
+
+  const resolutionTierMeta = useMemo(
+    () => RESOLUTION_TIERS.find((t) => t.id === resolutionTier),
+    [resolutionTier]
+  );
+
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, []);
+
   const onFile = useCallback((f) => {
     if (!f) return;
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
     setFile(f);
     setError(null);
     setDownloadPath(null);
+    setProgressPercent(0);
+    setProgressPhase("");
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     setPreviewUrl(URL.createObjectURL(f));
   }, [previewUrl]);
@@ -60,24 +132,112 @@ export default function App() {
     if (f?.type?.startsWith("video/")) onFile(f);
   }, [onFile]);
 
-  const processVideo = async () => {
+  const runExport = async () => {
     if (!file) return;
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
     setBusy(true);
     setError(null);
     setDownloadPath(null);
-    const fd = new FormData();
-    fd.append("video", file);
-    fd.append("platform", platform);
-    fd.append("effect", effect);
-    fd.append("framing", framing);
-    fd.append("ultraHd", String(ultraHd));
+    setProgressPercent(0);
+    setProgressPhase("upload");
     try {
-      const res = await fetch("/api/process", { method: "POST", body: fd });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || res.statusText);
-      setDownloadPath(data.downloadUrl);
+      const uploadId = await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "/api/upload");
+        xhr.upload.addEventListener("progress", (e) => {
+          if (e.lengthComputable) {
+            const r = e.loaded / e.total;
+            setProgressPercent(Math.round(r * 22));
+          }
+        });
+        xhr.onload = () => {
+          let data = {};
+          try {
+            data = JSON.parse(xhr.responseText || "{}");
+          } catch {
+            /* ignore */
+          }
+          if (xhr.status >= 200 && xhr.status < 300 && data.uploadId) {
+            resolve(data.uploadId);
+          } else {
+            reject(new Error(data.error || xhr.statusText || "Upload failed"));
+          }
+        };
+        xhr.onerror = () => reject(new Error("Network error during upload"));
+        const fd = new FormData();
+        fd.append("video", file);
+        xhr.send(fd);
+      });
+
+      setProgressPercent(22);
+      setProgressPhase("encode");
+
+      const startRes = await fetch("/api/render", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          uploadId,
+          platform,
+          framing,
+          effect,
+          outputFormat,
+          quality,
+          resolutionTier,
+        }),
+      });
+      const startData = await startRes.json().catch(() => ({}));
+      if (!startRes.ok) throw new Error(startData.error || startRes.statusText);
+      const { jobId } = startData;
+      if (!jobId) throw new Error("Server did not start a render job");
+
+      await new Promise((resolve, reject) => {
+        let inFlight = false;
+        pollRef.current = setInterval(() => {
+          if (inFlight) return;
+          inFlight = true;
+          fetch(`/api/jobs/${jobId}`)
+            .then((jr) => jr.json().then((job) => ({ jr, job })))
+            .then(({ jr, job }) => {
+              inFlight = false;
+              if (!jr.ok) {
+                if (pollRef.current) clearInterval(pollRef.current);
+                pollRef.current = null;
+                reject(new Error(job.error || "Could not read job status"));
+                return;
+              }
+              if (job.status === "processing") {
+                const enc = typeof job.percent === "number" ? job.percent : 0;
+                setProgressPercent(22 + Math.round((enc / 100) * 77));
+              }
+              if (job.status === "done") {
+                if (pollRef.current) clearInterval(pollRef.current);
+                pollRef.current = null;
+                setProgressPercent(100);
+                setProgressPhase("");
+                setDownloadPath(job.downloadUrl);
+                setTimeout(() => resolve(undefined), 400);
+              }
+              if (job.status === "error") {
+                if (pollRef.current) clearInterval(pollRef.current);
+                pollRef.current = null;
+                reject(new Error(job.error || "Rendering failed"));
+              }
+            })
+            .catch((err) => {
+              inFlight = false;
+              if (pollRef.current) clearInterval(pollRef.current);
+              pollRef.current = null;
+              reject(err instanceof Error ? err : new Error(String(err)));
+            });
+        }, 280);
+      });
     } catch (e) {
       setError(e.message || "Something went wrong");
+      setProgressPhase("");
+      setProgressPercent(0);
     } finally {
       setBusy(false);
     }
@@ -92,8 +252,8 @@ export default function App() {
           <span className="grad2">Facebook</span>
         </h1>
         <p className="lede">
-          Pick a format, add a look, choose framing, and export — including optional Ultra HD upscale
-          with sharpening. Built for creators who want CapCut-style speed in the browser.
+          Pick a format, framing, and a clear resolution tier (HD through 4K), then export. Compression
+          quality is separate from pixel size so you always know what you are downloading.
         </p>
       </header>
 
@@ -130,9 +290,6 @@ export default function App() {
 
       <section className="panel">
         <h2>2 · Platform &amp; framing</h2>
-        <p className="hint">Optimized sizes for feeds, stories, and reels — similar to tools like{" "}
-          <a href="https://www.capcut.com/" target="_blank" rel="noreferrer">CapCut</a>{" "}
-          export presets.</p>
         {Object.entries(groupedPlatforms).map(([group, items]) => (
           <div key={group} className="platform-group">
             <h3>{group}</h3>
@@ -188,21 +345,79 @@ export default function App() {
       </section>
 
       <section className="panel">
-        <h2>4 · Quality</h2>
-        <label className="toggle-row">
-          <input
-            type="checkbox"
-            checked={ultraHd}
-            onChange={(e) => setUltraHd(e.target.checked)}
-          />
-          <div>
-            <span className="toggle-title">Ultra HD export</span>
-            <span className="toggle-desc">
-              Lanczos upscale to ~4K (long edge 3840px) plus light sharpening. Slower export, larger
-              files — great for archival or re-editing. Not a substitute for true AI restoration.
-            </span>
-          </div>
-        </label>
+        <h2>4 · Output format</h2>
+        <p className="hint">
+          Choose the file type for download — convert container and codecs (MP4 and MOV use H.264 +
+          AAC; WebM uses VP9 + Opus).
+        </p>
+        <div className="effect-grid format-grid">
+          {OUTPUT_FORMATS.map((f) => (
+            <button
+              key={f.id}
+              type="button"
+              className={`card effect-card ${outputFormat === f.id ? "active" : ""}`}
+              onClick={() => setOutputFormat(f.id)}
+            >
+              <span className="effect-label">{f.label}</span>
+              <span className="effect-hint">{f.hint}</span>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section className="panel">
+        <h2>5 · Download size &amp; quality</h2>
+        <h3 className="subhead">Output resolution (scale)</h3>
+        <p className="hint">
+          This sets how many pixels you get, keeping your platform aspect ratio. Categories match common
+          labels: <strong>HD</strong> (720p class), <strong>Full HD</strong> (1080p), <strong>2K</strong> (1440p),
+          <strong>4K / UHD</strong> (2160p short side — e.g. 3840×2160 for 16:9).
+        </p>
+        <div className="effect-grid tier-grid">
+          {RESOLUTION_TIERS.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              className={`card effect-card tier-card ${resolutionTier === t.id ? "active" : ""}`}
+              onClick={() => setResolutionTier(t.id)}
+            >
+              <span className="effect-label">
+                {t.label}
+                <span className="tier-badge">{t.badge}</span>
+              </span>
+              <span className="effect-hint">{t.hint}</span>
+            </button>
+          ))}
+        </div>
+        {estimatedOutputPx && resolutionTierMeta && (
+          <p className="output-estimate" role="status">
+            <strong>Download frame size:</strong>{" "}
+            <span className="mono">
+              {estimatedOutputPx.w} × {estimatedOutputPx.h}
+            </span>{" "}
+            px — <strong>{resolutionTierMeta.label}</strong> ({resolutionTierMeta.badge}) for the
+            platform you selected.
+          </p>
+        )}
+        <h3 className="subhead">Compression (file quality)</h3>
+        <p className="hint">
+          Same pixel size as above — this only changes how heavily the video is compressed (CRF, encoder
+          preset, audio bitrate). Use <strong>Balanced</strong> unless you need smaller files or maximum
+          fidelity.
+        </p>
+        <div className="effect-grid quality-grid">
+          {ENCODING_QUALITY.map((q) => (
+            <button
+              key={q.id}
+              type="button"
+              className={`card effect-card ${quality === q.id ? "active" : ""}`}
+              onClick={() => setQuality(q.id)}
+            >
+              <span className="effect-label">{q.label}</span>
+              <span className="effect-hint">{q.hint}</span>
+            </button>
+          ))}
+        </div>
       </section>
 
       <section className="panel actions">
@@ -210,10 +425,30 @@ export default function App() {
           type="button"
           className="btn primary"
           disabled={!file || busy}
-          onClick={processVideo}
+          onClick={runExport}
         >
-          {busy ? "Rendering…" : "Export video"}
+          {busy ? "Working…" : "Export video"}
         </button>
+        {busy && (
+          <div
+            className="progress-wrap"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={progressPercent}
+            aria-label={progressPhase === "upload" ? "Upload progress" : "Encoding progress"}
+          >
+            <div className="progress-head">
+              <span className="progress-label">
+                {progressPhase === "upload" ? "Uploading your video…" : "Encoding & rendering…"}
+              </span>
+              <span className="progress-pct">{progressPercent}%</span>
+            </div>
+            <div className="progress-track">
+              <div className="progress-fill" style={{ width: `${progressPercent}%` }} />
+            </div>
+          </div>
+        )}
         {error && <p className="err">{error}</p>}
         {downloadPath && (
           <a className="btn ghost" href={downloadPath} download>
@@ -412,6 +647,40 @@ export default function App() {
           margin-top: 0.2rem;
           line-height: 1.3;
         }
+        .tier-card .effect-label {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          gap: 0.35rem;
+        }
+        .tier-badge {
+          font-size: 0.62rem;
+          font-weight: 600;
+          text-transform: uppercase;
+          letter-spacing: 0.05em;
+          color: var(--accent);
+          background: rgba(110, 231, 255, 0.12);
+          padding: 0.1rem 0.4rem;
+          border-radius: 999px;
+        }
+        .output-estimate {
+          margin: 0.85rem 0 0;
+          padding: 0.75rem 0.85rem;
+          background: var(--surface-2);
+          border: 1px solid var(--border);
+          border-radius: 10px;
+          font-size: 0.86rem;
+          line-height: 1.45;
+          color: var(--muted);
+        }
+        .output-estimate strong {
+          color: var(--text);
+        }
+        .mono {
+          font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+          color: var(--accent);
+          font-weight: 600;
+        }
         .row-options {
           display: grid;
           grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -467,9 +736,46 @@ export default function App() {
         }
         .actions {
           display: flex;
-          flex-wrap: wrap;
-          align-items: center;
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 0.85rem;
+        }
+        .actions > .btn.primary {
+          align-self: flex-start;
+        }
+        .actions .progress-wrap {
+          width: 100%;
+          max-width: 420px;
+        }
+        .progress-head {
+          display: flex;
+          justify-content: space-between;
+          align-items: baseline;
+          margin-bottom: 0.4rem;
           gap: 0.75rem;
+        }
+        .progress-label {
+          font-size: 0.84rem;
+          color: var(--muted);
+        }
+        .progress-pct {
+          font-size: 0.84rem;
+          font-weight: 700;
+          font-variant-numeric: tabular-nums;
+          color: var(--accent);
+        }
+        .progress-track {
+          height: 8px;
+          border-radius: 999px;
+          background: var(--surface-2);
+          border: 1px solid var(--border);
+          overflow: hidden;
+        }
+        .progress-fill {
+          height: 100%;
+          border-radius: 999px;
+          background: linear-gradient(115deg, var(--accent), var(--accent-2));
+          transition: width 0.22s ease-out;
         }
         .btn {
           border: none;
