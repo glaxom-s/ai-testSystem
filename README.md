@@ -1,11 +1,11 @@
 # Social Video Studio
 
-React + Node.js video workflow for **Instagram** and **Facebook** presets: pick **effects**, **framing** (fill vs fit), and optional **Ultra HD** upscale (FFmpeg Lanczos + sharpen). UI is inspired by quick-export flows like [CapCut](https://www.capcut.com/).
+React + Node.js video workflow for **Instagram** and **Facebook** presets: pick **effects**, **framing** (fill vs fit), and optional **Ultra HD** upscale (FFmpeg Lanczos + sharpen). UI is inspired by quick-export flows like.
 
 ## Prerequisites
 
 - Node.js 18+
-- [FFmpeg](https://ffmpeg.org/download.html) on your `PATH` (required for encoding and filters)
+
 
 ## Setup
 
