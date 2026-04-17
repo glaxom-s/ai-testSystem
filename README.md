@@ -42,6 +42,15 @@ Open `http://localhost:5173`. The Vite dev server proxies `/api` to the backend.
 
 Optional env: see `.env.example`.
 
+## Tests
+
+```bash
+cd server && npm install && npm test
+cd client && npm install && npm test
+```
+
+From repo root: `npm run test` runs both. For HTML + terminal coverage reports: `npm run test:coverage` (outputs `server/coverage` and `client/coverage`). Server tests cover `videoProcessor` helpers and HTTP routes (no FFmpeg required for those cases). Client tests cover output-dimension helpers and a smoke render of `App`.
+
 ## Note on “Ultra HD”
 
 Export uses **scaling and sharpening**, not AI super-resolution. For AI-style enhancement you would integrate a separate inference service; the current stack matches a typical Node + FFmpeg deployment.

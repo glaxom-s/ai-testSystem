@@ -95,6 +95,10 @@ app.get("/api/download/:file", (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`Video studio API http://localhost:${PORT}`);
-});
+export { app };
+
+if (process.env.VITEST !== "true") {
+  app.listen(PORT, () => {
+    console.log(`Video studio API http://localhost:${PORT}`);
+  });
+}
