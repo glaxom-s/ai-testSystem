@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { PRESET_DIM, dimensionsForTier } from "./lib/outputDimensions.js";
 
 const PLATFORMS = [
   { id: 'instagram-reels', group: 'Instagram', icon: '🎬', desc: '9:16 · Reels & short video' },
@@ -38,36 +39,12 @@ const ENCODING_QUALITY = [
   { id: "max", label: "Maximum", hint: "Best quality, slowest" },
 ];
 
-/** Matches server PRESETS — used to preview output pixel size for the selected tier. */
-const PRESET_DIM = {
-  "instagram-reels": { w: 1080, h: 1920 },
-  "instagram-story": { w: 1080, h: 1920 },
-  "instagram-square": { w: 1080, h: 1080 },
-  "instagram-portrait": { w: 1080, h: 1350 },
-  "facebook-feed": { w: 1920, h: 1080 },
-  "facebook-story": { w: 1080, h: 1920 },
-  "facebook-square": { w: 1080, h: 1080 },
-};
-
-const SHORT_SIDE = { hd: 720, fullhd: 1080, "2k": 1440, "4k": 2160 };
-
 const RESOLUTION_TIERS = [
   { id: "hd", label: "HD", badge: "720p class", hint: "Short side 720 px — smaller, faster uploads." },
   { id: "fullhd", label: "Full HD", badge: "1080p class", hint: "Short side 1080 px — typical social quality." },
   { id: "2k", label: "2K", badge: "1440p class", hint: "Short side 1440 px — between Full HD and 4K." },
   { id: "4k", label: "4K / UHD", badge: "2160p class", hint: "Short side 2160 px — full UHD frame + light sharpen." },
 ];
-
-function dimensionsForTier(pw, ph, tier) {
-  const shortTarget = SHORT_SIDE[tier] ?? 1080;
-  const m = Math.min(pw, ph);
-  const f = shortTarget / m;
-  let w = Math.round(pw * f);
-  let h = Math.round(ph * f);
-  if (w % 2) w -= 1;
-  if (h % 2) h -= 1;
-  return { w: Math.max(2, w), h: Math.max(2, h) };
-}
 
 export default function App() {
   const [file, setFile] = useState(null);

@@ -5,12 +5,20 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.21.2",
     "multer": "^1.4.5-lts.1",
     "uuid": "^11.0.3"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^3.0.5",
+    "supertest": "^7.0.0",
+    "vitest": "^3.0.5"
   }
 }
