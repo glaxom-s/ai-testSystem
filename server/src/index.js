@@ -60,6 +60,30 @@ const uploadNamed = multer({
 /** @type {Map<string, Record<string, unknown>>} */
 const jobs = new Map();
 
+/**
+ * @param {Record<string, unknown>} body
+ */
+function parseEditFromBody(body) {
+  const ts =
+    body.trimStartSec != null && body.trimStartSec !== ""
+      ? parseFloat(String(body.trimStartSec))
+      : 0;
+  let trimEndSec = null;
+  if (body.trimEndSec != null && body.trimEndSec !== "") {
+    const x = parseFloat(String(body.trimEndSec));
+    if (Number.isFinite(x)) trimEndSec = x;
+  }
+  const ps = parseFloat(String(body.playbackSpeed ?? ""));
+  return {
+    trimStartSec: Number.isFinite(ts) ? ts : 0,
+    trimEndSec,
+    cropPreset: String(body.cropPreset || "none"),
+    maskPreset: String(body.maskPreset || "none"),
+    reverse: body.reverse === true || body.reverse === "true",
+    playbackSpeed: Number.isFinite(ps) ? ps : 1,
+  };
+}
+
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });
@@ -96,6 +120,7 @@ app.post("/api/render", (req, res) => {
   const resolutionTier = req.body.resolutionTier != null ? String(req.body.resolutionTier) : "";
   const outputFormat = String(req.body.outputFormat || "mp4").toLowerCase();
   const quality = String(req.body.quality || "balanced").toLowerCase();
+  const editOpts = parseEditFromBody(req.body);
 
   const outId = uuidv4();
   const ext = outputExtensionForFormat(outputFormat);
@@ -125,6 +150,7 @@ app.post("/api/render", (req, res) => {
           ultraHd: ultraHdLegacy,
           outputFormat,
           quality,
+          ...editOpts,
         },
         (pct) => {
           jobState.percent = pct;
@@ -175,6 +201,7 @@ app.post("/api/process", upload.single("video"), async (req, res) => {
   const resolutionTier = req.body.resolutionTier != null ? String(req.body.resolutionTier) : "";
   const outputFormat = String(req.body.outputFormat || "mp4").toLowerCase();
   const quality = String(req.body.quality || "balanced").toLowerCase();
+  const editOpts = parseEditFromBody(req.body);
 
   const id = uuidv4();
   const ext = outputExtensionForFormat(outputFormat);
@@ -193,6 +220,7 @@ app.post("/api/process", upload.single("video"), async (req, res) => {
       ultraHd: ultraHdLegacy,
       outputFormat,
       quality,
+      ...editOpts,
     });
   } catch (e) {
     fs.unlink(inputPath, () => {});

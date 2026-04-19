@@ -101,11 +101,14 @@ describe("listPresets", () => {
 });
 
 describe("listExportOptions", () => {
-  it("exposes formats, qualities, and resolution tiers", () => {
+  it("exposes formats, qualities, resolution tiers, and edit tools", () => {
     const ex = listExportOptions();
     expect(ex.formats.map((f) => f.id)).toEqual(["mp4", "mov", "webm"]);
     expect(ex.qualities).toHaveLength(4);
     expect(ex.resolutionTiers.map((t) => t.id)).toEqual(["hd", "fullhd", "2k", "4k"]);
+    expect(ex.editTools?.crops?.length).toBeGreaterThan(0);
+    expect(ex.editTools?.masks?.length).toBeGreaterThan(0);
+    expect(ex.editTools?.speeds?.length).toBeGreaterThan(0);
   });
 });
 

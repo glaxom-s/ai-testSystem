@@ -12,6 +12,6 @@ describe("App", () => {
   it("lists upload and platform sections", () => {
     render(<App />);
     expect(screen.getByRole("heading", { name: /1 · upload/i })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: /2 · platform/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /3 · platform/i })).toBeInTheDocument();
   });
 });

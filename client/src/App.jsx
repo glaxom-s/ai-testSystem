@@ -1,5 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import VideoEditingBar from "./components/VideoEditingBar.jsx";
 import { PRESET_DIM, dimensionsForTier } from "./lib/outputDimensions.js";
+
+function wrapNetworkError(err) {
+  const msg = err?.message ?? String(err);
+  if (
+    err instanceof TypeError ||
+    /Failed to fetch|NetworkError|ECONNREFUSED|Load failed|network error/i.test(msg)
+  ) {
+    return new Error(
+      "Cannot reach the API server (connection refused). In another terminal run: cd server && npm run dev — default port is 5050. If you use a different port, add client/.env with VITE_API_PROXY=http://127.0.0.1:YOUR_PORT"
+    );
+  }
+  return err instanceof Error ? err : new Error(msg);
+}
 
 const PLATFORMS = [
   { id: 'instagram-reels', group: 'Instagram', icon: '🎬', desc: '9:16 · Reels & short video' },
@@ -46,6 +60,25 @@ const RESOLUTION_TIERS = [
   { id: "4k", label: "4K / UHD", badge: "2160p class", hint: "Short side 2160 px — full UHD frame + light sharpen." },
 ];
 
+const CROP_PRESETS = [
+  { id: "none", label: "Full frame", hint: "No extra crop before social sizing." },
+  { id: "center_tight", label: "Center tight", hint: "Crop ~8% from each side (focus subject)." },
+  { id: "widescreen", label: "Trim sides", hint: "Narrower frame — less width (landscape clips)." },
+  { id: "portrait_trim", label: "Trim top/bottom", hint: "Shorter frame — less height (vertical clips)." },
+];
+
+const MASK_PRESETS = [
+  { id: "none", label: "No mask", hint: "Clean edges." },
+  { id: "vignette", label: "Soft vignette", hint: "Edge darkening (simple mask look)." },
+];
+
+const PLAYBACK_SPEEDS = [
+  { value: 0.5, label: "0.5× slow" },
+  { value: 1, label: "1× normal" },
+  { value: 1.5, label: "1.5×" },
+  { value: 2, label: "2× fast" },
+];
+
 export default function App() {
   const [file, setFile] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
@@ -61,6 +94,15 @@ export default function App() {
   const [progressPercent, setProgressPercent] = useState(0);
   const [progressPhase, setProgressPhase] = useState("");
   const pollRef = useRef(null);
+  const videoRef = useRef(null);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [trimStartSec, setTrimStartSec] = useState(0);
+  const [trimEndSec, setTrimEndSec] = useState(null);
+  const [cropPreset, setCropPreset] = useState("none");
+  const [maskPreset, setMaskPreset] = useState("none");
+  const [reverseVideo, setReverseVideo] = useState(false);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1);
+  const [playbackSec, setPlaybackSec] = useState(0);
 
   const groupedPlatforms = useMemo(() => {
     const g = {};
@@ -99,9 +141,28 @@ export default function App() {
     setDownloadPath(null);
     setProgressPercent(0);
     setProgressPhase("");
+    setVideoDuration(0);
+    setTrimStartSec(0);
+    setTrimEndSec(null);
+    setCropPreset("none");
+    setMaskPreset("none");
+    setReverseVideo(false);
+    setPlaybackSpeed(1);
+    setPlaybackSec(0);
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     setPreviewUrl(URL.createObjectURL(f));
   }, [previewUrl]);
+
+  const onVideoLoadedMetadata = useCallback(() => {
+    const el = videoRef.current;
+    if (!el) return;
+    const d = el.duration;
+    if (Number.isFinite(d) && d > 0) {
+      setVideoDuration(d);
+      setTrimEndSec((prev) => (prev == null || prev > d ? d : prev));
+      setTrimStartSec((s) => Math.min(Math.max(0, s), Math.max(0, d - 0.05)));
+    }
+  }, []);
 
   const onDrop = useCallback((e) => {
     e.preventDefault();
@@ -143,7 +204,7 @@ export default function App() {
             reject(new Error(data.error || xhr.statusText || "Upload failed"));
           }
         };
-        xhr.onerror = () => reject(new Error("Network error during upload"));
+        xhr.onerror = () => reject(wrapNetworkError(new TypeError("Failed to fetch")));
         const fd = new FormData();
         fd.append("video", file);
         xhr.send(fd);
@@ -152,19 +213,30 @@ export default function App() {
       setProgressPercent(22);
       setProgressPhase("encode");
 
-      const startRes = await fetch("/api/render", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          uploadId,
-          platform,
-          framing,
-          effect,
-          outputFormat,
-          quality,
-          resolutionTier,
-        }),
-      });
+      let startRes;
+      try {
+        startRes = await fetch("/api/render", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            uploadId,
+            platform,
+            framing,
+            effect,
+            outputFormat,
+            quality,
+            resolutionTier,
+            trimStartSec,
+            trimEndSec: trimEndSec != null ? trimEndSec : undefined,
+            cropPreset,
+            maskPreset,
+            reverse: reverseVideo,
+            playbackSpeed,
+          }),
+        });
+      } catch (err) {
+        throw wrapNetworkError(err);
+      }
       const startData = await startRes.json().catch(() => ({}));
       if (!startRes.ok) throw new Error(startData.error || startRes.statusText);
       const { jobId } = startData;
@@ -207,7 +279,7 @@ export default function App() {
               inFlight = false;
               if (pollRef.current) clearInterval(pollRef.current);
               pollRef.current = null;
-              reject(err instanceof Error ? err : new Error(String(err)));
+              reject(wrapNetworkError(err instanceof Error ? err : new Error(String(err))));
             });
         }, 280);
       });
@@ -260,13 +332,105 @@ export default function App() {
         </div>
         {previewUrl && (
           <div className="preview-wrap">
-            <video className="preview" src={previewUrl} controls playsInline />
+            <video
+              ref={videoRef}
+              className="preview"
+              src={previewUrl}
+              controls
+              playsInline
+              onLoadedMetadata={onVideoLoadedMetadata}
+              onTimeUpdate={(e) => setPlaybackSec(e.currentTarget.currentTime)}
+            />
+            {videoDuration > 0 && (
+              <VideoEditingBar
+                videoRef={videoRef}
+                previewUrl={previewUrl}
+                fileName={file?.name ?? "Video"}
+                duration={videoDuration}
+                playbackSec={playbackSec}
+                trimStartSec={trimStartSec}
+                trimEndSec={trimEndSec ?? videoDuration}
+                onTrimStartSec={setTrimStartSec}
+                onTrimEndSec={setTrimEndSec}
+                busy={busy}
+                progressPercent={progressPercent}
+                progressPhase={progressPhase}
+              />
+            )}
           </div>
         )}
       </section>
 
+      {previewUrl && (
+        <section className="panel edit-panel">
+          <h2>2 · Cut, crop &amp; transforms</h2>
+          <p className="hint">
+            Trim the clip on the <strong>timeline over the preview</strong> (drag edges, drag across the strip to
+            select a range, or slide the whole block). Then set crop, mask, speed, or reverse here. Export still uses
+            your platform and resolution settings below.
+          </p>
+
+          <h3 className="subhead">Crop (before social frame)</h3>
+          <div className="effect-grid edit-tool-grid">
+            {CROP_PRESETS.map((c) => (
+              <button
+                key={c.id}
+                type="button"
+                className={`card effect-card ${cropPreset === c.id ? "active" : ""}`}
+                onClick={() => setCropPreset(c.id)}
+              >
+                <span className="effect-label">{c.label}</span>
+                <span className="effect-hint">{c.hint}</span>
+              </button>
+            ))}
+          </div>
+
+          <h3 className="subhead">Mask</h3>
+          <div className="row-options mask-row">
+            {MASK_PRESETS.map((m) => (
+              <button
+                key={m.id}
+                type="button"
+                className={`pill ${maskPreset === m.id ? "active" : ""}`}
+                onClick={() => setMaskPreset(m.id)}
+              >
+                <span className="pill-label">{m.label}</span>
+                <span className="pill-hint">{m.hint}</span>
+              </button>
+            ))}
+          </div>
+
+          <h3 className="subhead">Speed &amp; reverse</h3>
+          <div className="speed-row">
+            {PLAYBACK_SPEEDS.map((s) => (
+              <button
+                key={s.value}
+                type="button"
+                className={`chip ${playbackSpeed === s.value ? "active" : ""}`}
+                onClick={() => setPlaybackSpeed(s.value)}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
+          <label className="toggle-row reverse-toggle">
+            <input
+              type="checkbox"
+              checked={reverseVideo}
+              onChange={(e) => setReverseVideo(e.target.checked)}
+            />
+            <div>
+              <span className="toggle-title">Reverse clip</span>
+              <span className="toggle-desc">
+                Plays video and audio backwards (slower encode on long clips).
+              </span>
+            </div>
+          </label>
+        </section>
+      )}
+
       <section className="panel">
-        <h2>2 · Platform &amp; framing</h2>
+        <h2>3 · Platform &amp; framing</h2>
         {Object.entries(groupedPlatforms).map(([group, items]) => (
           <div key={group} className="platform-group">
             <h3>{group}</h3>
@@ -305,7 +469,7 @@ export default function App() {
       </section>
 
       <section className="panel">
-        <h2>3 · Style &amp; effects</h2>
+        <h2>4 · Style &amp; effects</h2>
         <div className="effect-grid">
           {EFFECTS.map((e) => (
             <button
@@ -322,7 +486,7 @@ export default function App() {
       </section>
 
       <section className="panel">
-        <h2>4 · Output format</h2>
+        <h2>5 · Output format</h2>
         <p className="hint">
           Choose the file type for download — convert container and codecs (MP4 and MOV use H.264 +
           AAC; WebM uses VP9 + Opus).
@@ -343,7 +507,7 @@ export default function App() {
       </section>
 
       <section className="panel">
-        <h2>5 · Download size &amp; quality</h2>
+        <h2>6 · Download size &amp; quality</h2>
         <h3 className="subhead">Output resolution (scale)</h3>
         <p className="hint">
           This sets how many pixels you get, keeping your platform aspect ratio. Categories match common
@@ -551,6 +715,7 @@ export default function App() {
         }
         .preview-wrap {
           margin-top: 1rem;
+          position: relative;
           border-radius: var(--radius);
           overflow: hidden;
           border: 1px solid var(--border);
@@ -560,6 +725,7 @@ export default function App() {
           width: 100%;
           max-height: 360px;
           display: block;
+          vertical-align: top;
         }
         .platform-group h3 {
           font-size: 0.8rem;
@@ -657,6 +823,36 @@ export default function App() {
           font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
           color: var(--accent);
           font-weight: 600;
+        }
+        .edit-tool-grid {
+          grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+        }
+        .mask-row {
+          margin-bottom: 0.25rem;
+        }
+        .speed-row {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 0.45rem;
+          margin-bottom: 0.75rem;
+        }
+        .chip {
+          border: 1px solid var(--border);
+          background: var(--surface-2);
+          color: var(--text);
+          border-radius: 999px;
+          padding: 0.4rem 0.85rem;
+          font-size: 0.82rem;
+          font-weight: 600;
+          cursor: pointer;
+          transition: border-color 0.15s, box-shadow 0.15s;
+        }
+        .chip.active {
+          border-color: var(--accent);
+          box-shadow: 0 0 0 1px rgba(110, 231, 255, 0.25);
+        }
+        .reverse-toggle {
+          margin-top: 0.25rem;
         }
         .row-options {
           display: grid;

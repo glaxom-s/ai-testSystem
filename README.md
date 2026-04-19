@@ -31,6 +31,8 @@ npm run dev
 
 Open `http://localhost:5173`. The Vite dev server proxies `/api` to the backend.
 
+**`http proxy error` / `ECONNREFUSED`:** the API is not running or is on another port. Start `cd server && npm run dev` first. If the server uses a non-default `PORT`, copy `client/.env.example` to `client/.env` and set `VITE_API_PROXY` to the same host/port (for example `http://127.0.0.1:3000`).
+
 ## API
 
 | Method | Path | Description |
@@ -38,7 +40,7 @@ Open `http://localhost:5173`. The Vite dev server proxies `/api` to the backend.
 | GET | `/api/health` | Health check |
 | GET | `/api/presets` | Platform size map |
 | POST | `/api/upload` | Multipart `video` → `{ uploadId }` (stable filename for the next step) |
-| POST | `/api/render` | JSON: `uploadId`, `platform`, `framing`, `effect`, `outputFormat`, `quality`, `resolutionTier` (optional `ultraHd`) → `{ jobId }` immediately; encoding runs in the background |
+| POST | `/api/render` | JSON: `uploadId`, `platform`, `framing`, `effect`, `outputFormat`, `quality`, `resolutionTier` (optional `ultraHd`). **Edit (optional):** `trimStartSec`, `trimEndSec` (omit for full length), `cropPreset` (`none` \| `center_tight` \| `widescreen` \| `portrait_trim`), `maskPreset` (`none` \| `vignette`), `reverse` (boolean), `playbackSpeed` (`0.5`–`2`) → `{ jobId }` |
 | GET | `/api/jobs/:jobId` | `{ status: processing\|done\|error, percent, downloadUrl?, error? }` — poll for progress |
 | POST | `/api/process` | **Legacy** single-shot: multipart `video` + same fields as `/api/render` (no live progress) |
 | GET | `/api/download/:file` | Download rendered file |

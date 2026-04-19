@@ -118,14 +118,47 @@ export function normalizeResolutionTier(raw) {
   return "fullhd";
 }
 
+const USER_CROP = {
+  none: "",
+  center_tight: "crop=iw*92/100:ih*92/100:(iw-ow)/2:(ih-oh)/2",
+  widescreen: "crop=iw*88/100:ih:(iw-ow)/2:0",
+  portrait_trim: "crop=iw:ih*88/100:0:(ih-oh)/2",
+};
+
 /**
- * Build video filter: scale/crop to target, optional color effect, optional sharpen on 4K tier.
- * @param {{ width: number, height: number }} target
- * @param {FramingMode} framing
- * @param {EffectId} effectId
- * @param {ResolutionTierId} resolutionTier
+ * @param {string | undefined} id
  */
-function buildVideoFilter(target, framing, effectId, resolutionTier) {
+function normalizeCropPreset(id) {
+  const k = String(id || "none").toLowerCase();
+  return USER_CROP[k] !== undefined ? k : "none";
+}
+
+/**
+ * @param {number} speed
+ */
+function buildAtempoChain(speed) {
+  if (!Number.isFinite(speed) || speed <= 0) return "";
+  const parts = [];
+  let r = speed;
+  while (r > 2.001) {
+    parts.push("atempo=2.0");
+    r /= 2;
+  }
+  while (r < 0.499) {
+    parts.push("atempo=0.5");
+    r /= 0.5;
+  }
+  if (Math.abs(r - 1) > 0.02) {
+    parts.push(`atempo=${Math.min(2, Math.max(0.5, r)).toFixed(4)}`);
+  }
+  return parts.join(",");
+}
+
+/**
+ * Full vf: optional user crop → platform scale → color → mask → sharpen → speed → reverse
+ * @param {{ cropPreset: string, maskPreset: string, reverse: boolean, speed: number }} edit
+ */
+function buildFullVideoFilter(target, framing, effectId, resolutionTier, edit) {
   const tw = target.width;
   const th = target.height;
   const baseScale =
@@ -133,17 +166,40 @@ function buildVideoFilter(target, framing, effectId, resolutionTier) {
       ? `scale=${tw}:${th}:force_original_aspect_ratio=increase,crop=${tw}:${th}`
       : `scale=${tw}:${th}:force_original_aspect_ratio=decrease,pad=${tw}:${th}:(ow-iw)/2:(oh-ih)/2:color=black`;
 
+  const cropKey = normalizeCropPreset(edit.cropPreset);
+  const userCrop = USER_CROP[cropKey] || "";
+
   const effect = EFFECT_FILTERS[effectId] || "";
-  const parts = [baseScale];
+  const parts = [];
+  if (userCrop) parts.push(userCrop);
+  parts.push(baseScale);
   if (effect) parts.push(effect);
-
-  let chain = parts.filter(Boolean).join(",");
-
-  if (resolutionTier === "4k") {
-    chain = `${chain},unsharp=5:5:0.55:3:3:0.0`;
+  if (edit.maskPreset === "vignette") {
+    parts.push("vignette=angle=PI/5");
   }
+  if (resolutionTier === "4k") {
+    parts.push("unsharp=5:5:0.55:3:3:0.0");
+  }
+  const speed = edit.speed > 0 ? edit.speed : 1;
+  if (Math.abs(speed - 1) > 0.02) {
+    parts.push(`setpts=${(1 / speed).toFixed(6)}*PTS`);
+  }
+  if (edit.reverse) {
+    parts.push("reverse");
+  }
+  return parts.filter(Boolean).join(",");
+}
 
-  return chain;
+/**
+ * @param {{ reverse: boolean, speed: number }} edit
+ * @returns {string}
+ */
+function buildAudioFilter(edit) {
+  const parts = [];
+  if (edit.reverse) parts.push("areverse");
+  const tempo = buildAtempoChain(edit.speed > 0 ? edit.speed : 1);
+  if (tempo) parts.push(tempo);
+  return parts.join(",");
 }
 
 /** @typedef {'mp4' | 'mov' | 'webm'} OutputFormat */
@@ -186,6 +242,24 @@ export function listExportOptions() {
       { id: "high", label: "High", desc: "Sharper detail, larger file" },
       { id: "max", label: "Maximum", desc: "Best quality, slowest encode, largest file" },
     ],
+    editTools: {
+      crops: [
+        { id: "none", label: "None", desc: "Keep full frame before platform crop." },
+        { id: "center_tight", label: "Center tight", desc: "Crop ~8% from each edge (focus subject)." },
+        { id: "widescreen", label: "Widescreen strip", desc: "Narrower frame — trims left/right (good on landscape)." },
+        { id: "portrait_trim", label: "Tall trim", desc: "Shorter frame — trims top/bottom (good on vertical)." },
+      ],
+      masks: [
+        { id: "none", label: "None" },
+        { id: "vignette", label: "Soft vignette", desc: "Darkens edges (simple mask look)." },
+      ],
+      speeds: [
+        { value: 0.5, label: "0.5× slow" },
+        { value: 1, label: "1× normal" },
+        { value: 1.5, label: "1.5×" },
+        { value: 2, label: "2× fast" },
+      ],
+    },
     resolutionTiers: [
       {
         id: "hd",
@@ -281,7 +355,23 @@ function buildEncodeArgs(outputFormat, qualityId, resolutionTier) {
 }
 
 /**
- * @param {{ inputPath: string, outputPath: string, platform: string, framing: string, effect: string, resolutionTier?: string, ultraHd?: boolean, outputFormat?: string, quality?: string }} opts
+ * @param {{
+ *   inputPath: string;
+ *   outputPath: string;
+ *   platform: string;
+ *   framing: string;
+ *   effect: string;
+ *   resolutionTier?: string;
+ *   ultraHd?: boolean;
+ *   outputFormat?: string;
+ *   quality?: string;
+ *   trimStartSec?: number;
+ *   trimEndSec?: number | null;
+ *   cropPreset?: string;
+ *   maskPreset?: string;
+ *   reverse?: boolean;
+ *   playbackSpeed?: number;
+ * }} opts
  * @param {{ onProgress?: (percent0to99: number) => void } | ((percent0to99: number) => void) | undefined} progress */
 export function processVideo(opts, progress) {
   const onProgress =
@@ -306,18 +396,56 @@ export function processVideo(opts, progress) {
   const quality =
     qid === "light" || qid === "balanced" || qid === "high" || qid === "max" ? qid : "balanced";
 
+  const speed = Math.min(2, Math.max(0.25, Number(opts.playbackSpeed) || 1));
+  const reverse = Boolean(opts.reverse);
+  const cropPreset = normalizeCropPreset(opts.cropPreset);
+  const maskPreset = opts.maskPreset === "vignette" ? "vignette" : "none";
+
+  const edit = { cropPreset, maskPreset, reverse, speed };
+
   const target = dimensionsForTier(preset, resolutionTier);
-  const vf = buildVideoFilter(target, framing, effect, resolutionTier);
+  const vf = buildFullVideoFilter(target, framing, effect, resolutionTier, edit);
   const encodeArgs = buildEncodeArgs(
     outputFormat,
     /** @type {QualityId} */ (quality),
     resolutionTier
   );
+  const af = buildAudioFilter(edit);
 
-  const args = ["-y", "-i", opts.inputPath, "-vf", vf, ...encodeArgs, opts.outputPath];
+  return probeDurationSeconds(opts.inputPath).then((fullDur) => {
+    let t0 = Math.max(0, Number(opts.trimStartSec) || 0);
+    let t1 =
+      opts.trimEndSec != null && Number.isFinite(Number(opts.trimEndSec))
+        ? Number(opts.trimEndSec)
+        : fullDur;
+    if (fullDur > 0) {
+      t0 = Math.min(t0, Math.max(0, fullDur - 0.05));
+      t1 = Math.min(Math.max(t1, t0 + 0.05), fullDur);
+    } else {
+      t1 = Math.max(t1, t0 + 0.1);
+    }
+    const segmentLen = Math.max(0.05, t1 - t0);
+    const progressDenom =
+      fullDur > 0 ? Math.max(0.1, segmentLen / speed) : segmentLen / speed;
 
-  return probeDurationSeconds(opts.inputPath).then((durationSec) =>
-    new Promise((resolve, reject) => {
+    const args = ["-y"];
+    if (t0 > 0.001) {
+      args.push("-ss", String(t0));
+    }
+    args.push("-i", opts.inputPath);
+    if (fullDur > 0 && segmentLen + 0.02 < fullDur) {
+      args.push("-t", String(segmentLen));
+    } else if (fullDur <= 0 && segmentLen < 1e6) {
+      args.push("-t", String(segmentLen));
+    }
+
+    args.push("-vf", vf);
+    if (af) {
+      args.push("-af", af);
+    }
+    args.push(...encodeArgs, opts.outputPath);
+
+    return new Promise((resolve, reject) => {
       let lastReport = 0;
       const report = (pct) => {
         if (!onProgress) return;
@@ -335,11 +463,11 @@ export function processVideo(opts, progress) {
       ff.stderr?.on("data", (d) => {
         stderr += d.toString();
         if (!onProgress) return;
-        if (durationSec > 0) {
+        if (progressDenom > 0) {
           const tail = stderr.slice(-8000);
           const t = lastTimeSecondsInFfmpegLog(tail);
           if (t != null) {
-            report((t / durationSec) * 100);
+            report((t / progressDenom) * 100);
           }
         } else {
           const tail = stderr.slice(-2000);
@@ -364,8 +492,8 @@ export function processVideo(opts, progress) {
           resolve({ stderr: stderr.slice(-2000) });
         } else reject(new Error(`ffmpeg exited ${code}: ${stderr.slice(-1500)}`));
       });
-    })
-  );
+    });
+  });
 }
 
 /**
